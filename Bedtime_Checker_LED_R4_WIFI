@@ -1,0 +1,145 @@
+/*
+  Bedtime + Time Split Frames with Auto-DST & Blinking Colon
+
+  - 22:00–05:59: show X then time
+  - 06:00–21:59: show OK then time
+  - During time-phase (4s), split into two 2s sub-frames:
+    * First 2s: hours and blinking colon ("16 :")
+    * Next 2s: minutes ("19"), displayed on the right side with a space between digits
+  Automatically adjusts between CET (UTC+1) and CEST (UTC+2).
+
+  Docs: https://docs.arduino.cc/tutorials/uno-r4-wifi/led-matrix
+*/
+
+#include <WiFiS3.h>
+#include <WiFiUdp.h>
+#include <NTPClient.h>
+#include "Arduino_LED_Matrix.h"
+#include <time.h>
+
+const char* ssid     = "SSID";
+const char* password = "PASS";
+
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 3600, 60000);  // start with CET
+
+ArduinoLEDMatrix matrix;
+
+// Symbol frames (8×12)
+const uint8_t Xframe[8][12] = {
+  {0,0,0,0,0,0,0,0,0,0,0,0},
+  {0,1,0,0,0,0,0,1,0,0,0,0},
+  {0,0,1,0,0,0,1,0,0,0,0,0},
+  {0,0,0,1,0,1,0,0,0,0,0,0},
+  {0,0,0,0,1,0,0,0,0,0,0,0},
+  {0,0,0,1,0,1,0,0,0,0,0,0},
+  {0,0,1,0,0,0,1,0,0,0,0,0},
+  {0,1,0,0,0,0,0,1,0,0,0,0}
+};
+const uint8_t OKframe[8][12] = {
+  {0,0,1,1,0,0,0,1,0,0,1,0},
+  {0,1,0,0,1,0,0,1,0,1,0,0},
+  {0,1,0,0,1,0,0,1,1,0,0,0},
+  {0,1,0,0,1,0,0,1,0,0,0,0},
+  {0,1,0,0,1,0,0,1,1,0,0,0},
+  {0,1,0,0,1,0,0,1,0,1,0,0},
+  {0,0,1,1,0,0,0,1,0,0,1,0},
+  {0,0,0,0,0,0,0,0,0,0,0,0}
+};
+
+// 3×8 font for digits 0–9
+const uint8_t digitFont[10][8][3] = {
+  {{1,1,1},{1,0,1},{1,0,1},{1,0,1},{1,0,1},{1,0,1},{1,0,1},{1,1,1}},
+  {{0,1,0},{1,1,0},{0,1,0},{0,1,0},{0,1,0},{0,1,0},{0,1,0},{1,1,1}},
+  {{1,1,1},{0,0,1},{0,0,1},{1,1,1},{1,0,0},{1,0,0},{1,0,0},{1,1,1}},
+  {{1,1,1},{0,0,1},{0,0,1},{1,1,1},{0,0,1},{0,0,1},{0,0,1},{1,1,1}},
+  {{1,0,1},{1,0,1},{1,0,1},{1,1,1},{0,0,1},{0,0,1},{0,0,1},{0,0,1}},
+  {{1,1,1},{1,0,0},{1,0,0},{1,1,1},{0,0,1},{0,0,1},{0,0,1},{1,1,1}},
+  {{1,1,1},{1,0,0},{1,0,0},{1,1,1},{1,0,1},{1,0,1},{1,0,1},{1,1,1}},
+  {{1,1,1},{0,0,1},{0,0,1},{0,1,0},{0,1,0},{0,1,0},{0,1,0},{0,1,0}},
+  {{1,1,1},{1,0,1},{1,0,1},{1,1,1},{1,0,1},{1,0,1},{1,0,1},{1,1,1}},
+  {{1,1,1},{1,0,1},{1,0,1},{1,1,1},{0,0,1},{0,0,1},{0,0,1},{1,1,1}}
+};
+
+uint8_t displayFrame[8][12];
+int timeOffsetSec = 3600;  // CET
+
+int daysInMonth(int m, int y) {
+  if (m==2) return ((y%4==0 && y%100!=0) || (y%400==0)) ? 29:28;
+  return (m==4||m==6||m==9||m==11) ? 30:31;
+}
+
+bool inDST(int year, int month, int day, int hour) {
+  if (month < 3 || month > 10) return false;
+  if (month > 3 && month < 10) return true;
+  int ld = daysInMonth(month, year);
+  time_t raw = timeClient.getEpochTime() - timeOffsetSec;
+  struct tm tm0; gmtime_r(&raw, &tm0);
+  tm0.tm_mday += (ld - tm0.tm_mday);
+  mktime(&tm0);
+  int w = tm0.tm_wday;
+  int lastSun = ld - w;
+  if (month==3) return (day>lastSun) || (day==lastSun && hour>=1);
+  return (day<lastSun) || (day==lastSun && hour<1);
+}
+
+void setup() {
+  Serial.begin(115200);
+  matrix.begin();
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) { delay(500); Serial.print("."); }
+  Serial.println("\nWiFi connected.");
+  timeClient.setTimeOffset(timeOffsetSec);
+  timeClient.begin();
+}
+
+void loop() {
+  timeClient.update();
+  unsigned long rawLocal = timeClient.getEpochTime();
+  unsigned long rawUtc   = rawLocal - timeOffsetSec;
+  struct tm tmUtc; time_t tUtc = rawUtc; gmtime_r(&tUtc, &tmUtc);
+  bool dst = inDST(tmUtc.tm_year+1900, tmUtc.tm_mon+1, tmUtc.tm_mday, tmUtc.tm_hour);
+  int newOffset = dst ? 7200 : 3600;
+  if (newOffset != timeOffsetSec) {
+    timeOffsetSec = newOffset;
+    timeClient.setTimeOffset(timeOffsetSec);
+    timeClient.forceUpdate();
+    rawLocal = timeClient.getEpochTime();
+  }
+  struct tm tmLoc; time_t tLoc = rawLocal; gmtime_r(&tLoc, &tmLoc);
+  int hour   = tmLoc.tm_hour;
+  int minute = tmLoc.tm_min;
+
+  unsigned long phase = (millis() / 4000) & 1;
+  bool night = (hour>=22 || hour<6);
+
+  if (phase == 0) {
+    memcpy(displayFrame, night ? Xframe : OKframe, sizeof displayFrame);
+  } else {
+    unsigned long sub = (millis() / 2000) & 1;
+    if (sub == 0) {
+      // hours + blinking colon, one space between digits
+      memset(displayFrame, 0, sizeof displayFrame);
+      int hT = hour/10, hO = hour%10;
+      for (int r = 0; r < 8; r++) {
+        for (int c = 0; c < 3; c++) displayFrame[r][c    ] = digitFont[hT][r][c];
+        for (int c = 0; c < 3; c++) displayFrame[r][c + 4] = digitFont[hO][r][c];
+      }
+      bool blink = ((millis()/500) & 1);
+      displayFrame[2][8] = blink;
+      displayFrame[5][8] = blink;
+    } else {
+      // minutes only, one space between digits, at right side
+      memset(displayFrame, 0, sizeof displayFrame);
+      int mT = minute/10, mO = minute%10;
+      int startMin = 5;  // position tens at col5, ones at col9
+      for (int r = 0; r < 8; r++) {
+        for (int c = 0; c < 3; c++) displayFrame[r][startMin + c    ] = digitFont[mT][r][c];
+        for (int c = 0; c < 3; c++) displayFrame[r][startMin + 4 + c] = digitFont[mO][r][c];
+      }
+    }
+  }
+
+  matrix.renderBitmap(displayFrame, 8, 12);
+  delay(200);
+}
