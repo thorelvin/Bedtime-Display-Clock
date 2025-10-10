@@ -1,3 +1,8 @@
+This is for installing on a kids room, when it says "OK" its rise and shine time.
+
+Printed a box for it that shows only screen. Powered by a 5V usb charger.
+
+
 Bedtime + Time Split Frames with Auto-DST & Blinking Colon
 
   - 22:00–05:59: show X then time
